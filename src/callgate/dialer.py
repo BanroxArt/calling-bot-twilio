@@ -1,4 +1,12 @@
-"""Place one reminder call: gate, dial, record."""
+"""Place one reminder call: gate, dial, record.
+
+There is a gap between ``Gate.check`` committing and Twilio accepting the
+call. The dialer re-reads the do-not-call list and consent right before the
+REST request, which shrinks the gap to one HTTP round trip but cannot close
+it: an opt-out that lands after Twilio accepts the call still lets the phone
+ring. The answer-time check in ``App.voice_reminder`` then hangs up with no
+message. Treat that as the expected worst case, not a bug.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +51,17 @@ class Dialer:
         if not decision.allowed or decision.approval is None:
             return DialResult(False, decision)
         approval = decision.approval
+        if self.store.on_dnc(approval.phone) or not any(
+            c.id == approval.consent_id
+            for c in self.store.active_consents(approval.phone, approval.purpose)
+        ):
+            self.store.update_attempt(approval.attempt_id, status="not_placed")
+            self.store.audit(
+                "dial_cancelled",
+                self.gate.phone_ref(approval.phone),
+                f"attempt={approval.attempt_id}: opted out between check and dial",
+            )
+            return DialResult(False, decision, error="opted out before dial")
         q = urllib.parse.urlencode({"appt": appointment_id, "when": when_text, "purpose": purpose})
         base = self.s.public_base_url
         try:
@@ -53,7 +72,9 @@ class Dialer:
                 status_callback=f"{base}/twilio/status",
             )
         except TwilioError as exc:
-            status = "unknown" if exc.ambiguous else "failed"
+            # Ambiguous: Twilio may have placed it, so it counts against the
+            # daily cap. Otherwise Twilio refused and the phone never rang.
+            status = "unknown" if exc.ambiguous else "not_placed"
             self.store.update_attempt(approval.attempt_id, status=status)
             log.warning(
                 "dial failed",

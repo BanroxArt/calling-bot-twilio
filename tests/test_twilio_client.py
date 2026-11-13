@@ -48,14 +48,26 @@ def test_create_call_form_and_auth(gate, consented):
 
 def test_refuses_without_real_approval(gate, consented):
     a = approval(gate, consented)
+    # Bypass __post_init__ and change the number on a real approval.
     forged = object.__new__(type(a))
     for f in dataclasses.fields(a):
         object.__setattr__(forged, f.name, getattr(a, f.name))
-    object.__setattr__(forged, "_key", None)
+    object.__setattr__(forged, "phone", "+15555550199")
+    fake = FakeTwilio()
     with pytest.raises(PermissionError):
-        client(FakeTwilio()).create_call(forged, **kwargs())
+        client(fake).create_call(forged, **kwargs())
+    assert fake.requests == []
     with pytest.raises(PermissionError):
         client(FakeTwilio()).create_call("+15555550142", **kwargs())  # type: ignore[arg-type]
+
+
+def test_one_approval_one_call(gate, consented):
+    a = approval(gate, consented)
+    fake = FakeTwilio()
+    client(fake).create_call(a, **kwargs())
+    with pytest.raises(PermissionError, match="already used"):
+        client(fake).create_call(a, **kwargs())
+    assert len(fake.requests) == 1
 
 
 def test_retries_429_with_retry_after_then_succeeds(gate, consented):

@@ -2,7 +2,16 @@
 
 Consent is append-only: granting adds a row, revoking stamps ``revoked_at``.
 Nothing is ever updated back to active, so the history of what a person
-agreed to and when is always reconstructable.
+agreed to and when is always reconstructable. A new grant for the same number
+and purpose supersedes the older active rows (``revoked_via`` says which row
+replaced them), so there is one current record per number and purpose.
+
+Attempts move through a one-way status machine (``STATUS_RANK``). Twilio
+webhooks carry no nonce or timestamp, so a replayed or late status callback
+is indistinguishable from a real one; the rank check means it can only move
+an attempt forward, never back from ``completed`` to ``ringing``.
+
+Every connection access goes through one re-entrant lock.
 """
 
 from __future__ import annotations
@@ -10,7 +19,10 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import TracebackType
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS consent (
@@ -47,7 +59,37 @@ CREATE TABLE IF NOT EXISTS audit (
   phone_ref TEXT,
   detail TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS webhook_seen (
+  key TEXT PRIMARY KEY,
+  ts REAL NOT NULL
+);
 """
+
+# Schema changes after the first release, applied in order on open and
+# tracked in PRAGMA user_version.
+MIGRATIONS = (
+    # 1: answered_by gets its own column instead of being glued onto status.
+    "ALTER TABLE attempt ADD COLUMN answered_by TEXT",
+)
+
+# Our own states (pending, unknown, not_placed) plus Twilio's CallStatus
+# values. Higher rank wins; equal rank never overwrites. Rank 5 is terminal.
+STATUS_RANK = {
+    "pending": 0,
+    "unknown": 1,
+    "queued": 2,
+    "initiated": 2,
+    "ringing": 3,
+    "in-progress": 4,
+    "completed": 5,
+    "busy": 5,
+    "no-answer": 5,
+    "canceled": 5,
+    "failed": 5,
+    "not_placed": 5,
+}
+# These never rang the phone, so they do not count against the daily cap.
+NOT_PLACED = ("not_placed", "failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +109,34 @@ class Store:
     def __init__(self, path: str = ":memory:") -> None:
         self._lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self.db.executescript(SCHEMA)
+        with self._lock:
+            self.db.executescript(SCHEMA)
+            self._migrate()
 
-    def tx(self):
+    def _migrate(self) -> None:
+        (version,) = self.db.execute("PRAGMA user_version").fetchone()
+        for n, stmt in enumerate(MIGRATIONS[version:], start=version + 1):
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.execute(stmt)
+                self.db.execute(f"PRAGMA user_version = {n}")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+
+    def tx(self) -> _Tx:
         """Serialised transaction. The gate check and the attempt insert share one."""
         return _Tx(self)
+
+    @contextmanager
+    def _locked(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            yield self.db
+
+    def ping(self) -> None:
+        with self._locked() as db:
+            db.execute("SELECT 1").fetchone()
 
     def add_consent(
         self,
@@ -83,28 +148,47 @@ class Store:
         disclosure_version: str,
         at: float | None = None,
     ) -> int:
+        if not evidence.strip():
+            # A grant without evidence would supersede a real one below.
+            raise ValueError("consent needs evidence: where and how the person agreed")
+        ts = time.time() if at is None else at
         with self.tx():
             cur = self.db.execute(
-                "INSERT INTO consent (phone, purpose, timezone, source, evidence, disclosure_version, granted_at)"
+                "INSERT INTO consent"
+                " (phone, purpose, timezone, source, evidence, disclosure_version, granted_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (phone, purpose, timezone, source, evidence, disclosure_version, at or time.time()),
+                (phone, purpose, timezone, source, evidence, disclosure_version, ts),
             )
-            return int(cur.lastrowid or 0)
+            new_id = int(cur.lastrowid or 0)
+            self.db.execute(
+                "UPDATE consent SET revoked_at = ?, revoked_via = ?"
+                " WHERE phone = ? AND purpose = ? AND revoked_at IS NULL AND id != ?",
+                (ts, f"superseded:{new_id}", phone, purpose, new_id),
+            )
+            return new_id
+
+    def active_consents(self, phone: str, purpose: str) -> list[Consent]:
+        """Unrevoked records for this number and purpose, newest first."""
+        with self._locked() as db:
+            rows = db.execute(
+                "SELECT id, phone, purpose, timezone, source, evidence, disclosure_version,"
+                " granted_at, revoked_at FROM consent"
+                " WHERE phone = ? AND purpose = ? AND revoked_at IS NULL"
+                " ORDER BY granted_at DESC, id DESC",
+                (phone, purpose),
+            ).fetchall()
+        return [Consent(*r) for r in rows]
 
     def active_consent(self, phone: str, purpose: str) -> Consent | None:
-        row = self.db.execute(
-            "SELECT id, phone, purpose, timezone, source, evidence, disclosure_version, granted_at, revoked_at"
-            " FROM consent WHERE phone = ? AND purpose = ? AND revoked_at IS NULL"
-            " ORDER BY granted_at DESC LIMIT 1",
-            (phone, purpose),
-        ).fetchone()
-        return Consent(*row) if row else None
+        rows = self.active_consents(phone, purpose)
+        return rows[0] if rows else None
 
     def revoke_all(self, phone: str, via: str, at: float | None = None) -> int:
         with self.tx():
             cur = self.db.execute(
-                "UPDATE consent SET revoked_at = ?, revoked_via = ? WHERE phone = ? AND revoked_at IS NULL",
-                (at or time.time(), via, phone),
+                "UPDATE consent SET revoked_at = ?, revoked_via = ?"
+                " WHERE phone = ? AND revoked_at IS NULL",
+                (time.time() if at is None else at, via, phone),
             )
             return cur.rowcount
 
@@ -112,51 +196,109 @@ class Store:
         with self.tx():
             self.db.execute(
                 "INSERT OR IGNORE INTO dnc (phone, added_at, reason) VALUES (?, ?, ?)",
-                (phone, at or time.time(), reason),
+                (phone, time.time() if at is None else at, reason),
             )
 
     def on_dnc(self, phone: str) -> bool:
-        return self.db.execute("SELECT 1 FROM dnc WHERE phone = ?", (phone,)).fetchone() is not None
+        with self._locked() as db:
+            return db.execute("SELECT 1 FROM dnc WHERE phone = ?", (phone,)).fetchone() is not None
 
     def attempts_since(self, phone: str, since: float) -> list[float]:
-        rows = self.db.execute(
-            "SELECT ts FROM attempt WHERE phone = ? AND ts >= ? ORDER BY ts", (phone, since)
-        ).fetchall()
+        """Timestamps of attempts that rang or may have rung the phone."""
+        with self._locked() as db:
+            rows = db.execute(
+                "SELECT ts FROM attempt WHERE phone = ? AND ts >= ?"
+                f" AND status NOT IN ({','.join('?' * len(NOT_PLACED))}) ORDER BY ts",
+                (phone, since, *NOT_PLACED),
+            ).fetchall()
         return [r[0] for r in rows]
 
     def add_attempt(self, phone: str, purpose: str, ts: float, status: str) -> int:
-        cur = self.db.execute(
-            "INSERT INTO attempt (phone, purpose, ts, status) VALUES (?, ?, ?, ?)",
-            (phone, purpose, ts, status),
-        )
-        return int(cur.lastrowid or 0)
+        with self._locked() as db:
+            cur = db.execute(
+                "INSERT INTO attempt (phone, purpose, ts, status) VALUES (?, ?, ?, ?)",
+                (phone, purpose, ts, status),
+            )
+            return int(cur.lastrowid or 0)
+
+    def attempt(self, attempt_id: int) -> tuple[str | None, str, str | None] | None:
+        """(call_sid, status, answered_by) for one attempt."""
+        with self._locked() as db:
+            row = db.execute(
+                "SELECT call_sid, status, answered_by FROM attempt WHERE id = ?", (attempt_id,)
+            ).fetchone()
+        return (row[0], row[1], row[2]) if row else None
 
     def update_attempt(self, attempt_id: int, *, call_sid: str | None = None, status: str) -> None:
+        """Record what the dialer learned while placing the call.
+
+        The status only moves forward: a status callback can arrive before
+        the dialer has written the Twilio response, and must not be undone.
+        """
+        rank = STATUS_RANK.get(status, 0)
         with self.tx():
+            row = self.db.execute(
+                "SELECT status FROM attempt WHERE id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                return
+            new_status = status if rank > STATUS_RANK.get(row[0], 0) else row[0]
             self.db.execute(
                 "UPDATE attempt SET call_sid = COALESCE(?, call_sid), status = ? WHERE id = ?",
-                (call_sid, status, attempt_id),
+                (call_sid, new_status, attempt_id),
             )
 
-    def update_attempt_by_sid(self, call_sid: str, status: str) -> int:
+    def advance_by_sid(self, call_sid: str, status: str, answered_by: str | None = None) -> str:
+        """Apply a status callback if it moves the attempt forward.
+
+        Returns ``updated``, ``stale`` (replayed, late or out of order),
+        ``unknown_status`` or ``unknown_call``.
+        """
+        rank = STATUS_RANK.get(status)
+        if rank is None:
+            return "unknown_status"
         with self.tx():
-            return self.db.execute(
-                "UPDATE attempt SET status = ? WHERE call_sid = ?", (status, call_sid)
-            ).rowcount
+            row = self.db.execute(
+                "SELECT id, status FROM attempt WHERE call_sid = ?", (call_sid,)
+            ).fetchone()
+            if row is None:
+                return "unknown_call"
+            current = STATUS_RANK.get(row[1], 0)
+            if rank <= current:
+                return "stale"
+            self.db.execute(
+                "UPDATE attempt SET status = ?, answered_by = COALESCE(?, answered_by)"
+                " WHERE id = ?",
+                (status, answered_by or None, row[0]),
+            )
+            return "updated"
+
+    def first_time(self, key: str, at: float | None = None) -> bool:
+        """True the first time ``key`` is seen. Makes webhook side effects idempotent."""
+        with self.tx():
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO webhook_seen (key, ts) VALUES (?, ?)",
+                (key, time.time() if at is None else at),
+            )
+            return cur.rowcount == 1
 
     def audit(
         self, event: str, phone_ref: str | None, detail: str, at: float | None = None
     ) -> None:
-        self.db.execute(
-            "INSERT INTO audit (ts, event, phone_ref, detail) VALUES (?, ?, ?, ?)",
-            (at or time.time(), event, phone_ref, detail),
-        )
+        with self._locked() as db:
+            db.execute(
+                "INSERT INTO audit (ts, event, phone_ref, detail) VALUES (?, ?, ?, ?)",
+                (time.time() if at is None else at, event, phone_ref, detail),
+            )
 
     def audit_rows(self) -> list[tuple[str, str | None, str]]:
-        return self.db.execute("SELECT event, phone_ref, detail FROM audit ORDER BY id").fetchall()
+        with self._locked() as db:
+            rows = db.execute("SELECT event, phone_ref, detail FROM audit ORDER BY id").fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
 
     def close(self) -> None:
-        self.db.close()
+        with self._locked() as db:
+            db.close()
 
 
 class _Tx:
@@ -171,7 +313,12 @@ class _Tx:
             self.depth_owner = True
         return self.store
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         try:
             if self.depth_owner:
                 self.store.db.execute("ROLLBACK" if exc_type else "COMMIT")

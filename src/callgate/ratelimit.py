@@ -33,6 +33,12 @@ class TokenBucket:
                 return True
             return False
 
+    def give_back(self, n: float = 1.0) -> None:
+        """Return tokens taken for work that did not happen. Never above burst."""
+        with self._lock:
+            self._refill()
+            self._tokens = min(self.burst, self._tokens + n)
+
     def wait_time(self, n: float = 1.0) -> float:
         with self._lock:
             self._refill()

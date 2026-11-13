@@ -19,8 +19,9 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
-from callgate.gate import Approval
+from callgate.gate import Approval, redeem
 from callgate.phone import mask
 
 log = logging.getLogger(__name__)
@@ -154,9 +155,9 @@ class TwilioClient:
         twiml_url: str,
         status_callback: str,
         timeout_s: int = 25,
-    ) -> dict:
-        if not isinstance(approval, Approval) or not approval.valid:
-            raise PermissionError("create_call needs an Approval from Gate.check")
+    ) -> dict[str, Any]:
+        # Spends the approval: one approval, one call, even if this raises.
+        redeem(approval)
         form = {
             "To": approval.phone,
             "From": from_number,
@@ -176,7 +177,7 @@ class TwilioClient:
         url = f"{self.base_url}/Accounts/{self.account_sid}/Calls.json"
         return self._post(url, body.encode(), approval)
 
-    def _post(self, url: str, body: bytes, approval: Approval) -> dict:
+    def _post(self, url: str, body: bytes, approval: Approval) -> dict[str, Any]:
         headers = {
             "Authorization": self._auth,
             "Content-Type": "application/x-www-form-urlencoded",
@@ -194,7 +195,8 @@ class TwilioClient:
                 raise TwilioError(f"network error: {type(exc).__name__}", ambiguous=True) from exc
             else:
                 if 200 <= resp.status < 300:
-                    return json.loads(resp.body or b"{}")
+                    data: dict[str, Any] = json.loads(resp.body or b"{}")
+                    return data
                 err = _error(resp)
                 if resp.status not in RETRY_STATUS:
                     if resp.status >= 500:
