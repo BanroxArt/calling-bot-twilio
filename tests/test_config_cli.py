@@ -91,3 +91,33 @@ def test_cli_rejects_bad_consent(tmp_path, capsys):
     ]
     assert main([*base, "--timezone", "Mars/Base", "--evidence", "x"]) == 2
     assert main([*base, "--timezone", "UTC", "--evidence", "  "]) == 2
+
+
+ON = {
+    **GOOD,
+    "OUTBOUND_ENABLED": "true",
+    "AUDIT_HASH_KEY": "a" * 32,
+    "CALLGATE_API_TOKEN": "t" * 32,
+}
+
+
+def test_outbound_needs_secrets():
+    assert load(ON).outbound_enabled
+    for key in ("AUDIT_HASH_KEY", "CALLGATE_API_TOKEN"):
+        with pytest.raises(ConfigError, match=key):
+            load({**ON, key: ""})
+        with pytest.raises(ConfigError, match=key):
+            load({**ON, key: "short"})
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [{"OUTBOUND_ENABLED": "yes"}, {"MAX_ATTEMPTS_PER_DAY": "two"}, {"PORT": "0"}],
+)
+def test_load_rejects_bad_values(patch):
+    with pytest.raises(ConfigError):
+        load({**ON, **patch})
+
+
+def test_cli_revoke_bad_number(tmp_path, capsys):
+    assert main(["--db", str(tmp_path / "c.db"), "consent", "revoke", "not-a-number"]) == 2

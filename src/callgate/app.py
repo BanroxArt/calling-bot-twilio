@@ -29,23 +29,49 @@ START_WORDS = {"start", "unstop", "yes"}
 MAX_BODY = 64 * 1024
 
 
+class _BadRequest(Exception):
+    def __init__(self, status: int, msg: str) -> None:
+        super().__init__(msg)
+        self.status = status
+        self.msg = msg
+
+
+STATUS_TEXT = {
+    200: "OK",
+    202: "Accepted",
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    409: "Conflict",
+    413: "Content Too Large",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
+
+
 class App:
     def __init__(self, settings: Settings, store: Store, dialer: Dialer) -> None:
         self.s = settings
         self.store = store
         self.dialer = dialer
 
-    def __call__(self, environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
+    def __call__(
+        self, environ: dict[str, Any], start_response: Callable[..., Any]
+    ) -> Iterable[bytes]:
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
         try:
             status, ctype, body = self.dispatch(method, path, environ)
+        except _BadRequest as exc:
+            status, ctype, body = exc.status, "application/json", json.dumps({"error": exc.msg})
         except Exception:
             log.exception("unhandled error", extra={"path": path})
             status, ctype, body = 500, "application/json", json.dumps({"error": "internal error"})
         data = body.encode()
         start_response(
-            f"{status} {'OK' if status < 400 else 'Error'}",
+            f"{status} {STATUS_TEXT.get(status, 'Error')}",
             [("Content-Type", ctype), ("Content-Length", str(len(data)))],
         )
         return [data]
@@ -53,19 +79,34 @@ class App:
     # plumbing
 
     @staticmethod
-    def _form(environ: dict[str, Any]) -> dict[str, str]:
+    def _body(environ: dict[str, Any]) -> bytes:
+        """Read the request body, refusing anything over MAX_BODY.
+
+        Truncating instead would hand a partial form to the signature check
+        or a partial JSON document to the parser and report the wrong error.
+        """
         try:
-            length = min(int(environ.get("CONTENT_LENGTH") or 0), MAX_BODY)
-        except ValueError:
-            length = 0
-        raw = environ["wsgi.input"].read(length).decode("utf-8", errors="replace") if length else ""
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError as exc:
+            raise _BadRequest(400, "bad content length") from exc
+        if length < 0:
+            raise _BadRequest(400, "bad content length")
+        if length > MAX_BODY:
+            raise _BadRequest(413, "body too large")
+        data: bytes = environ["wsgi.input"].read(length) if length else b""
+        return data
+
+    @classmethod
+    def _form(cls, environ: dict[str, Any]) -> dict[str, str]:
+        raw = cls._body(environ).decode("utf-8", errors="replace")
         return dict(urllib.parse.parse_qsl(raw, keep_blank_values=True))
 
     def _public_url(self, environ: dict[str, Any]) -> str:
         # Validate against the URL Twilio was configured with, not the Host
         # header, which a proxy may have rewritten.
-        qs = environ.get("QUERY_STRING", "")
-        return self.s.public_base_url + environ.get("PATH_INFO", "/") + (f"?{qs}" if qs else "")
+        qs = str(environ.get("QUERY_STRING", ""))
+        path = str(environ.get("PATH_INFO", "/"))
+        return self.s.public_base_url + path + (f"?{qs}" if qs else "")
 
     def _signed(self, environ: dict[str, Any], form: dict[str, str]) -> bool:
         sig = environ.get("HTTP_X_TWILIO_SIGNATURE")
@@ -76,11 +117,15 @@ class App:
 
     def dispatch(self, method: str, path: str, environ: dict[str, Any]) -> tuple[int, str, str]:
         if path == "/healthz" and method == "GET":
-            return (
-                200,
-                "application/json",
-                json.dumps({"status": "ok", "outbound": self.s.outbound_enabled}),
-            )
+            # Unauthenticated, so it says nothing about configuration (whether
+            # outbound is on is not the internet's business). It does touch
+            # the database, since a gate without its store cannot decide.
+            try:
+                self.store.ping()
+            except Exception:
+                log.exception("health check failed")
+                return 503, "application/json", json.dumps({"status": "unavailable"})
+            return 200, "application/json", json.dumps({"status": "ok"})
         if path == "/calls" and method == "POST":
             return self.api_call(environ)
         routes = {
@@ -125,7 +170,10 @@ class App:
         except PhoneError:
             return twiml.say_and_hangup("Goodbye.")
         if digit == "1":
-            self.store.audit("confirmed", mask(to), f"appt={query.get('appt', '')}")
+            # A replayed gather must not confirm twice.
+            sid = form.get("CallSid", "")
+            if not sid or self.store.first_time(f"confirm:{sid}"):
+                self.store.audit("confirmed", mask(to), f"appt={query.get('appt', '')}")
             return twiml.say_and_hangup("Thanks, you are confirmed. Goodbye.")
         if digit == "2" and self.s.support_number:
             self.store.audit("transfer", mask(to), "caller asked for a person")
@@ -140,10 +188,11 @@ class App:
     def status_callback(self, form: dict[str, str], query: dict[str, str]) -> str:
         sid, status = form.get("CallSid", ""), form.get("CallStatus", "")
         if sid and status:
-            answered_by = form.get("AnsweredBy", "")
-            self.store.update_attempt_by_sid(
-                sid, status if not answered_by else f"{status}:{answered_by}"
-            )
+            outcome = self.store.advance_by_sid(sid, status, form.get("AnsweredBy") or None)
+            if outcome != "updated":
+                # Replays and out-of-order deliveries land here. Twilio gets a
+                # 200 either way so it does not retry.
+                log.info("status callback ignored", extra={"outcome": outcome, "status": status})
         return twiml.sms_reply(None)
 
     def sms_inbound(self, form: dict[str, str], query: dict[str, str]) -> str:
@@ -177,9 +226,9 @@ class App:
         token = self.s.api_token
         if not token or not (auth.startswith("Bearer ") and hmac.compare_digest(auth[7:], token)):
             return 401, "application/json", json.dumps({"error": "unauthorized"})
+        raw = self._body(environ)
         try:
-            length = min(int(environ.get("CONTENT_LENGTH") or 0), MAX_BODY)
-            req = json.loads(environ["wsgi.input"].read(length) or b"{}")
+            req = json.loads(raw or b"{}")
             phone, purpose = str(req["phone"]), str(req["purpose"])
         except (ValueError, KeyError, TypeError):
             return 400, "application/json", json.dumps({"error": "need phone and purpose"})

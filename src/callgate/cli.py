@@ -39,8 +39,12 @@ def cmd_consent_add(args: argparse.Namespace) -> int:
 
 
 def cmd_consent_revoke(args: argparse.Namespace) -> int:
+    try:
+        phone = normalize(args.phone)
+    except PhoneError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     s = _store(args)
-    phone = normalize(args.phone)
     n = s.revoke_all(phone, "cli")
     s.add_dnc(phone, "cli")
     print(json.dumps({"revoked": n, "dnc": True}))
@@ -113,4 +117,5 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    rc: int = args.func(args)
+    return rc

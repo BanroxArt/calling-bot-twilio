@@ -47,6 +47,20 @@ class Settings:
     port: int = 8080
 
 
+MIN_SECRET_LEN = 32
+
+
+def _num(env: Mapping[str, str], key: str, default: str, kind: type[int] | type[float]) -> float:
+    raw = env.get(key, default)
+    try:
+        value = kind(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} must be a number") from exc
+    if value <= 0:
+        raise ConfigError(f"{key} must be positive")
+    return value
+
+
 def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -> Settings:
     env = os.environ if env is None else env
     missing = [
@@ -69,6 +83,22 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
         # Twilio signs the exact URL it called; plain http in front of a TLS
         # proxy is the classic cause of every webhook failing validation.
         raise ConfigError("PUBLIC_BASE_URL must be the https URL Twilio calls")
+    outbound = env.get("OUTBOUND_ENABLED", "false").strip().lower()
+    if outbound not in ("true", "false"):
+        raise ConfigError("OUTBOUND_ENABLED must be true or false")
+    outbound_enabled = outbound == "true"
+    audit_key = env.get("AUDIT_HASH_KEY", "")
+    api_token = env.get("CALLGATE_API_TOKEN", "")
+    if outbound_enabled and require_twilio:
+        # Fail closed at startup. With outbound on, a blank audit key would quietly
+        # degrade the audit log to masked numbers that cannot be joined, and
+        # a short API token is the one thing between the internet and /calls.
+        if len(audit_key) < MIN_SECRET_LEN:
+            raise ConfigError(f"AUDIT_HASH_KEY must be at least {MIN_SECRET_LEN} characters")
+        if len(api_token) < MIN_SECRET_LEN:
+            raise ConfigError(f"CALLGATE_API_TOKEN must be at least {MIN_SECRET_LEN} characters")
+        if not base.startswith("https://"):
+            raise ConfigError("PUBLIC_BASE_URL must be https when outbound calling is on")
     start = _hhmm(env.get("CALL_WINDOW_START", "08:00"), "CALL_WINDOW_START")
     end = _hhmm(env.get("CALL_WINDOW_END", "21:00"), "CALL_WINDOW_END")
     if not start < end:
@@ -81,15 +111,15 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
         caller_name=env.get("CALLER_NAME", "Example Co"),
         support_number=support,
         database_path=env.get("DATABASE_PATH", ":memory:"),
-        api_token=env.get("CALLGATE_API_TOKEN", ""),
-        audit_key=env.get("AUDIT_HASH_KEY", "").encode(),
-        outbound_enabled=env.get("OUTBOUND_ENABLED", "false").lower() == "true",
-        calls_per_minute=float(env.get("CALLS_PER_MINUTE", "10")),
-        max_attempts_per_day=int(env.get("MAX_ATTEMPTS_PER_DAY", "2")),
-        min_gap_minutes=int(env.get("MIN_GAP_MINUTES", "120")),
+        api_token=api_token,
+        audit_key=audit_key.encode(),
+        outbound_enabled=outbound_enabled,
+        calls_per_minute=_num(env, "CALLS_PER_MINUTE", "10", float),
+        max_attempts_per_day=int(_num(env, "MAX_ATTEMPTS_PER_DAY", "2", int)),
+        min_gap_minutes=int(_num(env, "MIN_GAP_MINUTES", "120", int)),
         window_start=start,
         window_end=end,
-        consent_max_age_days=int(env.get("CONSENT_MAX_AGE_DAYS", "548")),
+        consent_max_age_days=int(_num(env, "CONSENT_MAX_AGE_DAYS", "548", int)),
         host=env.get("HOST", "127.0.0.1"),
-        port=int(env.get("PORT", "8080")),
+        port=int(_num(env, "PORT", "8080", int)),
     )
