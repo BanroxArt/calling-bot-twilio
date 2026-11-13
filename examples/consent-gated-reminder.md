@@ -1,24 +1,27 @@
-# Example: consent-gated payment reminder (fictional)
+# Example: consent-gated appointment reminder (fictional)
 
-Do not use this to place calls without consent. U.S. calling and TCPA rules are legal questions for counsel. This file is a product pattern, not legal advice.
+Example Co, a fictional service business, calls customers who asked for a reminder the day before a booked appointment. Not legal advice; the rules for your call type are a question for counsel.
 
-## Required before any call is placed
+## Before any call is placed
 
-1. The person opted in, in writing, to this kind of call, at this number.
-2. The opt-in record stores time, channel, language, and what they agreed to hear.
-3. There is a working opt-out (spoken keypress and a written channel).
-4. Quiet hours are enforced in the callee's time zone.
-5. The script identifies who is calling and why in the first sentence.
+| Requirement | Where callgate enforces it |
+| --- | --- |
+| The person opted in to reminder calls at this number | `consent` row for `appointment_reminder`, checked in `Gate._check` |
+| The opt-in records when, where, what text they saw | `source`, `evidence`, `disclosure_version`, `granted_at` |
+| Opt-out works on the call and by text | keypress 9 in `/twilio/voice/gather`, STOP words in `/twilio/sms/inbound` |
+| Calls only in the callee's daytime | `hours.py`, timezone stored on the consent record |
+| Not called over and over | `MAX_ATTEMPTS_PER_DAY`, `MIN_GAP_MINUTES` |
+| Who is calling is said first | first sentence of the script in `twiml.py` |
 
-## Sample spoken script (after consent)
+## Script
 
-"This is a reminder from Example Co about an upcoming payment you asked us to call about. It is not a collection call from a third party. Press 1 to hear the due date we have on file. Press 2 to stop these calls."
+"Hello, this is an automated reminder from Example Co about an appointment you asked us to remind you about, on Tuesday at 3 PM. Press 1 to confirm. Press 2 to talk to a person. Press 9 to stop these calls."
 
-## What this example does not do
+Press 1 records a confirmation and hangs up. Press 2 transfers to `SUPPORT_NUMBER` if one is set, otherwise asks them to call back. Press 9 revokes every consent for the number, adds it to the do-not-call list and confirms on the same call. No input says goodbye and hangs up.
 
-- It does not dial a purchased list
-- It does not spoof a caller ID
-- It does not claim to be a bank or a government agency
-- It does not discuss another person's account with whoever picks up
+## Out of scope for this example
 
-Twilio account setup, webhook URLs, and production credentials are left to the operator. Do not commit secrets.
+- Payment, debt or account-balance reminders. Those carry extra rules; involve counsel first.
+- Dialing a purchased or scraped list.
+- Changing or hiding the caller ID.
+- Saying anything about the account beyond the appointment time to whoever answers.

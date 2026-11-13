@@ -1,77 +1,59 @@
 ---
 name: calling-bot-twilio
-description: Help a team design or build their own inbound or outbound voice agent using Twilio, with Vapi or Retell as alternatives. Use when the user wants an AI or scripted calling bot, appointment reminders, support lines, verification calls, or an IVR. Always include consent and U.S. TCPA-style notes. Do not help with unsolicited spam, robocall evasion, spoofing caller ID to deceive, or calling people who have not consented where consent is required.
+description: Help a team design or build its own inbound or outbound voice agent on Twilio (with Vapi or Retell as hosted alternatives) where consent is enforced in code. Use for appointment reminders, verification or follow-up calls, support lines, IVRs, or adding a speech model to a call flow. Uses the callgate service in this repo as the reference for the consent gate, opt-outs, calling windows and webhook security. Always include U.S. TCPA-style notes marked as not legal advice. Do not help with unsolicited calling, list dialing, robocall or carrier-rule evasion, caller ID spoofing, or calling people without the consent their call type requires.
 ---
 
-# Build your own calling bot (Twilio, with alternatives)
+# Build a consent-gated calling bot
 
-Help the team build a calling system they own. Consent comes first. If the request is to blast a purchased list, hide the caller, or evade carrier or legal rules, refuse.
+Help the team build a calling system they own and can defend. Consent comes first. If the request is to call a purchased list, hide who is calling, or get around carrier or legal rules, decline and explain why.
 
-## Scope
+## 1. Restate the use case
 
-- Inbound: a phone number that answers, routes, or talks with a script or a speech model, then hands off to a human.
-- Outbound: reminders, verification, or follow-up **to people who have a documented, appropriate relationship and consent** for that kind of call.
-- Voicemail drops, SMS follow-ups, and call recording are in scope only with the right notices and consent.
+One paragraph: who is called or calls in, why, what success is, and what the bot must never say. For a fintech that usually includes: no credit decisions, never "we are your bank", never ask for a password, PIN or full card number.
 
-## Legal and consent notes (not legal advice)
+Then say whether it looks consent-eligible and under which kind of consent (informational versus marketing), with the not-legal-advice caveat. Debt, credit, health or payment topics: stop and involve counsel before building.
 
-Laws change and differ by country, state, and call purpose. Tell the user to have counsel review their use case before going live. The points below are a starting checklist for U.S.-heavy products, not a complete TCPA manual.
+## 2. Pick a stack
 
-- **Get a lawful basis before you dial or text.** For many marketing or promotional calls and texts to mobile numbers in the United States, prior express written consent is required. Transactional or informational calls can have a different (still real) standard. Do not assume “we have their number in the CRM” is enough.
-- **Honor official and internal do-not-call lists.** Maintain a company-specific DNC list and process opt-outs immediately. Recurring programs need a way for someone to revoke consent.
-- **Identify the caller.** Say who is calling and, when required, why, at the start of the call. Do not spoof caller ID to impersonate a person, a bank, or a government agency.
-- **Recording and automated voices.** Many U.S. states require one-party or all-party consent to record. Automated or prerecorded voices have extra rules. Play or speak a recording notice when you record.
-- **Time-of-day and frequency.** Calling at unreasonable hours, or repeatedly after a refusal, is how programs get into trouble even when the first consent was valid.
-- **Vendors do not take the legal risk off the table.** Using Twilio, Vapi, Retell, or a carrier does not make a non-compliant campaign compliant.
-- **Financial, debt, and healthcare calls** have additional rules. If the bot will discuss debt, credit, or health, stop and involve counsel before building.
+- Twilio first when the team has engineers and wants to own recordings, logs and consent. Voice with TwiML webhooks; Media Streams or ConversationRelay if a speech model is added later.
+- Vapi or Retell when they need a demo in days. The hosted platform runs the conversation; the consent gate, DNC list and call log still live in the team's own system and are checked before the platform is asked to dial.
+- Human-first with a thin IVR is often the right version one: take a message, book a callback, hand off.
 
-If the user is outside the U.S., say clearly that local telecom, privacy, and marketing-call rules apply, and do not copy the U.S. checklist as if it were universal.
+## 3. Build the gate before anything that dials
 
-## Architecture choices
+Use `callgate` as the reference, whether or not they adopt it:
 
-### Twilio-first (good default when the team wants to own the rails)
+- `store.py`: append-only consent with purpose, timezone, source, evidence pointer, disclosure version; DNC; attempts; audit.
+- `gate.py`: every rule in one transaction, returning an `Approval` that only the gate can create.
+- `twilio.py`: `create_call` takes an `Approval` and nothing else; webhook signature validation; retries only on clearly-unprocessed errors.
+- `app.py`: signed webhooks, keypress 9 and SMS STOP words revoke everything, DNC re-checked when the callee answers.
+- `hours.py`: calling window in the timezone captured at opt-in, never guessed from the area code.
 
-Typical pieces:
+If they use another stack, map each of those to their code and point out any rule that is only enforced by convention.
 
-- A Twilio number or SIP trunk
-- Twilio Voice for the call leg (TwiML, Media Streams, or the Voice SDK)
-- Your backend (the system of record for consent, user, and conversation state)
-- Optional: a speech-to-text / LLM / text-to-speech loop, or a simpler button-and-prompt IVR
-- Optional: Twilio SMS or email for confirmations, never as a silent substitute for consent
+## 4. Script
 
-Recommend this path when the team has engineers, cares about owning recordings and logs, and already uses Twilio or wants one vendor for SMS and voice.
+Greeting with who is calling and why, then one task, the opt-out on every call, an offer of a person, and a clean hangup. Say nothing account-specific beyond what is needed, because the person who answers may not be the person who consented. If recording, play the notice before recording starts.
 
-### Alternatives (mention, do not oversell)
+## 5. Adding a speech model
 
-- **Vapi** and **Retell** (and similar voice-agent platforms): faster to a demo, hosted conversation stack, still need your consent layer and a compliant caller identity. Good for a prototype; you still own the policy.
-- **In-house SIP + open-source STT/TTS**: more control, more operational work. Only suggest this if the team already has telephony experience.
-- **Human-first with a thin IVR**: often the right first version. A bot that takes a message and books a callback beats a chatty agent with no handoff.
+Only after the gate, logging and human handoff work. Constrain it: a system prompt, retrieval from approved content only, a tool allow-list, a maximum call length and a loop detector. Off-script on a regulated topic means transfer or end the call. The model never accepts agreements, payments or applications on its own.
 
-Always keep **consent, DNC, recording flags, and conversation logs in a system the team owns**, even if the voice model is hosted.
+## 6. Test plan
 
-## Build sequence
+Unit tests with a fake Twilio transport (no network), signature tests against official vectors, then one number in a Twilio test or subaccount calling phones the team owns. Check: no-consent is refused, STOP and keypress 9 stop the next call, out-of-window requests return a retry time, a forced 500 does not ring twice.
 
-1. Write the use case in one paragraph: who is called or who calls in, why, what success is, and what the bot must never say (for a fintech: no credit decision, no “we are your bank,” no request for a password or a full card number).
-2. Implement the consent check as a hard gate. No consent record, no outbound dial.
-3. Stand up one number in a non-production Twilio (or alternative) account. Use test numbers the team owns.
-4. Build a short script: greeting, identity, purpose, consent or recording notice, one task, offer a human, clean hangup.
-5. Add logging: call SID, timestamps, consent version, recording pointer, transcript if any, and the outcome. Redact secrets and payment data from transcripts.
-6. Add a live handoff to a person, or a documented voicemail path, before any public launch.
-7. Only then add an LLM. Constrain it with a system prompt, retrieval from approved content, and a tool allow-list. If it is off-script on a regulated topic, it must transfer or end the call.
+## Legal notes (not legal advice)
 
-## Safety and product quality
-
-- Set a maximum call length and a loop detector (bots that repeat themselves should transfer or hang up).
-- Do not let the model accept a legal agreement, a payment, or a credit application on its own unless counsel has approved that path.
-- Load-test and set rate limits so a bug cannot autodial a list.
-- Keep a kill switch (disable outbound in one flag).
-- Review a sample of recordings every week at the start.
+Have counsel review before going live. Starting points for U.S.-heavy products: consent appropriate to the call type, revocation honoured by any reasonable means and quickly, the 8 a.m. to 9 p.m. local window and stricter state rules, caller identification at the start, no misleading caller ID, care with frequency, and recording consent where it applies. Outside the U.S., say plainly that local rules apply and do not reuse this list. Using Twilio, Vapi, Retell or any carrier does not make a campaign compliant. More in `docs/compliance-notes.md`.
 
 ## Output format
 
-1. Use-case restatement and whether it looks consent-eligible (with the “not legal advice” caveat)
-2. Recommended stack (Twilio, Vapi/Retell, or human-first) and why
-3. Data model for consent, DNC, and call records
+1. Use-case restatement and consent eligibility, with the not-legal-advice caveat
+2. Recommended stack and why
+3. Data model for consent, DNC, attempts and audit
 4. Script outline
 5. Build steps and a test plan on numbers the team owns
-6. Open legal questions to take to counsel before production
+6. Open questions for counsel before production
+
+See `examples/consent-gated-reminder.md` for the pattern.

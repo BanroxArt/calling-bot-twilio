@@ -1,69 +1,84 @@
 # calling-bot-twilio
 
-A pattern for building a reminder or notification call flow with Twilio only after the callee has consented. Consent is a hard gate: no consent record, no outbound dial. This is not a robocall engine, not a sales dialer, and not a tool for blasting purchased lists.
+`callgate` is a small service for appointment-style reminder calls on Twilio where consent is enforced in code. No consent record, no dial; that rule is built into the call graph rather than left to whoever writes the next feature. It also handles opt-outs by keypress and SMS, calling windows in the callee's own timezone, attempt caps, rate limits, Twilio webhook signatures and an audit trail.
 
-Author: Art Akopian, CEO of [Banrox](https://banrox.com)
+It is not a dialer for lists, not a sales tool, and has no feature for hiding or spoofing caller ID. The repo also has `SKILL.md`, an agent skill for designing a calling bot (Twilio first, Vapi or Retell as alternatives) around the same rules.
 
-## What it does
+Author: Art Akopian ([Banrox](https://banrox.com))
 
-This repository is an agent skill. After you install it, ask your coding agent to help design or build an inbound or outbound voice agent that you own, using Twilio first, with Vapi or Retell as alternatives. The agent should:
+Nothing here is legal advice. See [docs/compliance-notes.md](docs/compliance-notes.md) and talk to counsel before calling anyone.
 
-- Put lawful consent, do-not-call, identity, recording notices, and quiet hours first
-- Treat U.S. TCPA-style rules as a starting checklist, with a clear "not legal advice" caveat, and say when counsel must review the use case before going live
-- Recommend a stack and a build sequence that keeps consent, DNC, and call records in a system the team owns
-- Refuse help with unsolicited spam, robocall evasion, spoofing caller ID to deceive, or calling people who have not consented where consent is required
-- Return a plan: use-case restatement, recommended stack, data model, script outline, test plan on numbers the team owns, and open legal questions
-
-Vendors do not take the legal risk off the table. Using Twilio, Vapi, Retell, or a carrier does not make a non-compliant campaign compliant.
-
-## Install
-
-Copy `SKILL.md` into your agent's skills folder, for example:
+## How a call happens
 
 ```text
-.cursor/skills/calling-bot-twilio/SKILL.md
+your app --POST /calls--> Gate.check --Approval--> TwilioClient.create_call --> Twilio
+                             |                                                   |
+                       deny + reasons                       POST /twilio/voice/reminder (signed)
+                       (audited)                            POST /twilio/voice/gather   (signed)
+                                                            POST /twilio/status         (signed)
 ```
 
-or the equivalent path your agent documents. Restart or reload skills if your agent requires it.
+`Gate.check` runs every rule in one database transaction and, only if all pass, records an attempt and returns an `Approval`. `TwilioClient.create_call` takes an `Approval` as its first argument and refuses anything else. `Approval` cannot be constructed outside `gate.py`. So the only way to reach Twilio's Calls API from this codebase is through the gate.
 
-## Use
+The gate checks, in order: outbound switched on (`OUTBOUND_ENABLED`, off by default), valid E.164, not on the do-not-call list, active consent for this number and purpose with evidence attached and not older than `CONSENT_MAX_AGE_DAYS`, inside the calling window in the timezone stored on the consent, under the per-number attempt cap and minimum gap, and a token from the global rate limiter. Each decision is audited with its reasons and a keyed hash of the number, not the number itself.
 
-Describe who is called or who calls in, why, what success is, and what the bot must never say. Have a documented consent record and a working opt-out before any outbound dial. Use test numbers the team owns. If the request is to blast a purchased list, hide the caller, or evade carrier or legal rules, the skill should refuse.
+## Run it
 
-## Example
+Python 3.11+. The only dependency is `tzdata`.
 
-See [examples/consent-gated-reminder.md](examples/consent-gated-reminder.md) for a fictional, consent-gated reminder pattern, including a sample script and the checks that must pass before any call is placed. It is a product pattern, not legal advice, and not a script to place live calls.
+```sh
+python -m pip install -e '.[dev]'
+make check                                   # ruff, content lint, 72 tests, no network
+
+cp .env.example .env                         # fill in; never commit .env
+callgate --db dev.db consent add +15555550142 --purpose appointment_reminder \
+  --timezone America/Chicago --source web_form --evidence form:8841 --disclosure-version v3
+callgate --db dev.db check +15555550142 --purpose appointment_reminder
+callgate serve                               # wsgiref, development only
+```
+
+Request a call from your backend:
+
+```sh
+curl -X POST https://calls.example.com/calls \
+  -H "Authorization: Bearer $CALLGATE_API_TOKEN" \
+  -d '{"phone":"+15555550142","purpose":"appointment_reminder","appointment_id":"a-19","when_text":"Tuesday at 3 PM"}'
+```
+
+`202` means queued with Twilio. `409` comes back with `reasons` (for example `["outside_calling_hours"]`) and, where it applies, `retry_after`.
+
+## Twilio setup
+
+1. Use a test or subaccount first and numbers your team owns.
+2. Point the number's voice status callback and the messaging webhook at `PUBLIC_BASE_URL/twilio/status` and `PUBLIC_BASE_URL/twilio/sms/inbound`.
+3. `PUBLIC_BASE_URL` must be exactly the https URL Twilio calls. Signatures are computed over that URL; a TLS-terminating proxy that rewrites scheme or host makes every webhook fail validation. Validation tries the URL with and without the default port, as Twilio's SDKs do.
+4. Leave Twilio's Advanced Opt-Out on for messaging. `callgate` records the opt-out on its side too, because Twilio's list does not cover voice.
+
+## Design decisions
+
+**Consent is append-only.** Granting adds a row with source, evidence pointer, disclosure version and timezone. Revoking stamps `revoked_at` and `revoked_via`. Nothing flips back. After an opt-out, a new opt-in has to be captured and recorded like the first one. An SMS `START` re-enables texting at the carrier but does not restore call consent here.
+
+**Timezone comes from the person, not the area code.** Mobile numbers move with people. A missing or invalid timezone on a consent record is a denial, not a guess.
+
+**Opt-out is checked twice.** Once in the gate, and again when Twilio fetches the script after the callee answers, because a STOP can land between dial and pickup.
+
+**Retries only when Twilio clearly did not act.** The Calls API has no idempotency key, so a retry after a 500 or a read timeout can ring someone twice. `callgate` retries 429, 503 and refused connections with full-jitter backoff (honouring `Retry-After`), and marks anything ambiguous as `unknown` for the status callback to settle.
+
+**The script says who and why first, and offers the way out every time.** It mentions only the appointment time, because the person who picks up may not be the person who consented. `MachineDetection` is on so answering machines are recorded in the attempt status; there is no voicemail drop.
+
+**No Twilio SDK.** One REST call and one signature scheme are short enough to own. The signature code is pinned to vectors produced by the official `twilio-python` validator in `tests/test_signature.py`.
 
 ## Limitations
 
-- Not legal advice and not a complete TCPA manual. Laws change and differ by country, state, and call purpose. Counsel should review a use case before production.
-- Not a robocaller, auto-dialer for unsolicited sales, or a way to spoof caller ID or evade do-not-call rules.
-- Transactional or informational calls can have a different (still real) standard than marketing calls; having a number in a CRM is not automatically consent.
-- Financial, debt, and healthcare calls have additional rules and should stop for counsel before anyone builds.
-- Twilio account setup, webhook URLs, and production credentials are left to the operator. Do not commit secrets.
+- `wsgiref` is not a production server. Run `callgate.app.App` under gunicorn or uWSGI behind TLS.
+- SQLite with one connection. Fine for one instance; for more, move the store to Postgres and keep the gate check and the attempt insert in one transaction (`SELECT ... FOR UPDATE` on the number).
+- The rate limiter is in-process. Several instances means several buckets.
+- No scheduler. A `409` with `retry_after` is for your job queue to act on.
+- No national DNC registry lookup. The internal list only covers people who opted out with you. Whether you need registry scrubbing depends on the call type; ask counsel.
+- English script only, one voice, no speech recognition or LLM. Adding one is in `SKILL.md`, behind the same gate.
 
 ## License
 
-The `LICENSE` file currently contains the MIT License text, with copyright holder Banrox Inc. and year 2026. This is a placeholder. The public licence is pending a final pick by Banrox and may change before the repository is published. Do not treat MIT as final until that decision is recorded.
+MIT. See [LICENSE](LICENSE). Copyright 2026 Banrox Inc.
 
-## Checks
-
-From the repository root:
-
-```text
-python3 scripts/check.py
-```
-
-This validates skill frontmatter, required sections, example files, local links, and a lint that public files do not include internal names or unsupported certification or traction claims.
-
-## Contributing
-
-Issues and patches are welcome after a public repository exists. Do not send requests to evade consent, calling, or carrier rules, and do not send exploit proof-of-concepts.
-
-## Related skills
-
-Sibling skills from the same author, each in its own repository:
-
-- `fraud-prevention` — defensive fraud-program checklist
-- `cybersecurity-baseline` — small-company security baseline (not a certification)
-- `live-codebase` — two-week plan to make one service shippable, observable, and safely connected to live data
+Pull requests that weaken the consent gate, add caller ID spoofing, or add list dialing will be closed.
