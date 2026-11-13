@@ -24,8 +24,9 @@ Then say whether it looks consent-eligible and under which kind of consent (info
 Use `callgate` as the reference, whether or not they adopt it:
 
 - `store.py`: append-only consent with purpose, timezone, source, evidence pointer, disclosure version; DNC; attempts; audit.
-- `gate.py`: every rule in one transaction, returning an `Approval` that only the gate can create.
-- `twilio.py`: `create_call` takes an `Approval` and nothing else; webhook signature validation; retries only on clearly-unprocessed errors.
+- `gate.py`: every rule in one transaction, returning a signed, single-use, short-lived `Approval`. It guards against mistakes in your own code, not against code that already holds the Twilio auth token.
+- `twilio.py`: `create_call` spends an `Approval` and takes nothing else; webhook signature validation; retries only on clearly-unprocessed errors.
+- `store.py` status machine: webhooks have no nonce, so status callbacks may only move an attempt forward.
 - `app.py`: signed webhooks, keypress 9 and SMS STOP words revoke everything, DNC re-checked when the callee answers.
 - `hours.py`: calling window in the timezone captured at opt-in, never guessed from the area code.
 

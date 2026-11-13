@@ -22,5 +22,9 @@ Twilio, Vapi, Retell or any carrier being involved does not make a non-compliant
 ## What to keep
 
 - Consent records with evidence, for as long as counsel says (often the statute of limitations, which for the TCPA is four years).
-- The audit table: every gate decision with reasons, every opt-out with channel.
-- Attempts with Twilio call SIDs and final status.
+- The audit table: every gate decision with reasons, every opt-out with channel, and any dial cancelled because an opt-out arrived between check and dial. It is a record you keep, not tamper-evident evidence; see the README limitations.
+- Attempts with Twilio call SIDs, final status and answering-machine result.
+
+## The check-to-dial gap
+
+An opt-out that arrives after Twilio has accepted a call cannot stop that call from ringing. `callgate` re-checks right before dialing and again at answer time, so the person hears no reminder, but the phone may ring once. Decide with counsel whether that is acceptable for your call type, and say so in your written procedures.
