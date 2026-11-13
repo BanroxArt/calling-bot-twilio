@@ -12,7 +12,7 @@ and a wrong guess is a call at 6 a.m.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -32,17 +32,36 @@ def in_window(now_utc: datetime, tz: str, start: time, end: time) -> bool:
     return start <= local.time().replace(tzinfo=None) < end
 
 
+def _first_on(day: date, z: ZoneInfo, start: time, end: time) -> datetime | None:
+    """First UTC instant on local ``day`` that is inside the window, if any.
+
+    A wall-clock start can fall in a DST gap (02:30 on spring-forward day
+    does not exist) or overlap (01:30 on fall-back day happens twice).
+    Both readings of the start are computed; the earliest in-window minute
+    between them is the answer. Outside DST changes they are equal.
+    """
+    readings = sorted(
+        datetime.combine(day, start, tzinfo=z).replace(fold=f).astimezone(UTC) for f in (0, 1)
+    )
+    t, last = readings[0], readings[1]
+    tz = z.key
+    while t <= last:
+        if in_window(t, tz, start, end):
+            return t
+        t += timedelta(minutes=1)
+    return None
+
+
 def next_window_start(now_utc: datetime, tz: str, start: time, end: time) -> datetime:
     """Earliest UTC time at or after ``now_utc`` that is inside the window."""
     z = zone(tz)
-    local = now_utc.astimezone(z)
     if in_window(now_utc, tz, start, end):
         return now_utc
-    day = (
-        local.date()
-        if local.time().replace(tzinfo=None) < start
-        else local.date() + timedelta(days=1)
-    )
-    # Build the wall-clock start and let zoneinfo resolve DST for that date.
-    candidate = datetime.combine(day, start, tzinfo=z)
-    return candidate.astimezone(now_utc.tzinfo)
+    local = now_utc.astimezone(z)
+    day = local.date()
+    for _ in range(8):
+        found = _first_on(day, z, start, end)
+        if found is not None and found >= now_utc:
+            return found.astimezone(now_utc.tzinfo)
+        day += timedelta(days=1)
+    raise TimezoneError(f"no calling window found in {tz!r} within a week")
