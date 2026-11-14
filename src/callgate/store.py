@@ -16,6 +16,7 @@ Every connection access goes through one re-entrant lock.
 
 from __future__ import annotations
 
+import secrets
 import sqlite3
 import threading
 import time
@@ -70,7 +71,17 @@ CREATE TABLE IF NOT EXISTS webhook_seen (
 MIGRATIONS = (
     # 1: answered_by gets its own column instead of being glued onto status.
     "ALTER TABLE attempt ADD COLUMN answered_by TEXT",
+    # 2: Idempotency-Key records for POST /calls.
+    "CREATE TABLE IF NOT EXISTS idempotency ("
+    " key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, owner TEXT NOT NULL, state TEXT NOT NULL,"
+    " status INTEGER, body TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL)",
 )
+
+# How long a completed Idempotency-Key answers with its stored response, and
+# how long an in-flight one blocks a retry before it counts as abandoned (the
+# process died between claiming the key and finishing the request).
+IDEMPOTENCY_TTL_S = 86_400.0
+IN_FLIGHT_TIMEOUT_S = 120.0
 
 # Our own states (pending, unknown, not_placed) plus Twilio's CallStatus
 # values. Higher rank wins; equal rank never overwrites. Rank 5 is terminal.
@@ -90,6 +101,18 @@ STATUS_RANK = {
 }
 # These never rang the phone, so they do not count against the daily cap.
 NOT_PLACED = ("not_placed", "failed")
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyClaim:
+    """``new`` (go ahead), ``replay`` (send ``status``/``body``), ``mismatch`` or ``in_flight``."""
+
+    outcome: str
+    status: int | None = None
+    body: str | None = None
+    # Random per claim. Completing or releasing needs it, so a request that
+    # was declared abandoned cannot overwrite the claim that replaced it.
+    owner: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +304,62 @@ class Store:
                 (key, time.time() if at is None else at),
             )
             return cur.rowcount == 1
+
+    def claim_idempotency_key(
+        self, key: str, fingerprint: str, at: float | None = None
+    ) -> IdempotencyClaim:
+        """Reserve ``key`` for one request, or say why it cannot be.
+
+        A key belongs to the first request body it was used with. The same
+        body again gets the stored response; a different body is a client
+        bug and is refused rather than silently answered with someone else's
+        result.
+        """
+        now = time.time() if at is None else at
+        with self.tx():
+            row = self.db.execute(
+                "SELECT fingerprint, state, status, body, created_at, updated_at"
+                " FROM idempotency WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None:
+                fp, state, status, body, created, updated = row
+                expired = now - created >= IDEMPOTENCY_TTL_S
+                abandoned = state == "in_flight" and now - updated >= IN_FLIGHT_TIMEOUT_S
+                if not (expired or abandoned):
+                    if fp != fingerprint:
+                        return IdempotencyClaim("mismatch")
+                    if state == "in_flight":
+                        return IdempotencyClaim("in_flight")
+                    return IdempotencyClaim("replay", int(status), str(body))
+                self.db.execute("DELETE FROM idempotency WHERE key = ?", (key,))
+            owner = secrets.token_hex(8)
+            self.db.execute(
+                "INSERT INTO idempotency (key, fingerprint, owner, state, created_at, updated_at)"
+                " VALUES (?, ?, ?, 'in_flight', ?, ?)",
+                (key, fingerprint, owner, now, now),
+            )
+            return IdempotencyClaim("new", owner=owner)
+
+    def complete_idempotency_key(
+        self, claim: IdempotencyClaim, key: str, status: int, body: str, at: float | None = None
+    ) -> bool:
+        """Store the response for replays. False if this claim no longer owns the key."""
+        with self.tx():
+            cur = self.db.execute(
+                "UPDATE idempotency SET state = 'done', status = ?, body = ?, updated_at = ?"
+                " WHERE key = ? AND owner = ? AND state = 'in_flight'",
+                (status, body, time.time() if at is None else at, key, claim.owner),
+            )
+            return cur.rowcount == 1
+
+    def release_idempotency_key(self, claim: IdempotencyClaim, key: str) -> None:
+        """Forget an in-flight key after a failure, so the client can retry with it."""
+        with self.tx():
+            self.db.execute(
+                "DELETE FROM idempotency WHERE key = ? AND owner = ? AND state = 'in_flight'",
+                (key, claim.owner),
+            )
 
     def audit(
         self, event: str, phone_ref: str | None, detail: str, at: float | None = None

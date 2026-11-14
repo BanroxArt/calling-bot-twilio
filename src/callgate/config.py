@@ -50,6 +50,7 @@ class Settings:
     consent_max_age_days: int = 548
     host: str = "127.0.0.1"
     port: int = 8080
+    require_idempotency_key: bool = False
 
     @property
     def calling_policy(self) -> CallingPolicy:
@@ -98,6 +99,9 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
     if outbound not in ("true", "false"):
         raise ConfigError("OUTBOUND_ENABLED must be true or false")
     outbound_enabled = outbound == "true"
+    require_key = env.get("REQUIRE_IDEMPOTENCY_KEY", "false").strip().lower()
+    if require_key not in ("true", "false"):
+        raise ConfigError("REQUIRE_IDEMPOTENCY_KEY must be true or false")
     audit_key = env.get("AUDIT_HASH_KEY", "")
     api_token = env.get("CALLGATE_API_TOKEN", "")
     if outbound_enabled and require_twilio:
@@ -158,4 +162,5 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
         consent_max_age_days=int(_num(env, "CONSENT_MAX_AGE_DAYS", "548", int)),
         host=env.get("HOST", "127.0.0.1"),
         port=int(_num(env, "PORT", "8080", int)),
+        require_idempotency_key=require_key == "true",
     )

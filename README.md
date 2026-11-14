@@ -44,8 +44,11 @@ Request a call from your backend:
 ```sh
 curl -X POST https://calls.example.com/calls \
   -H "Authorization: Bearer $CALLGATE_API_TOKEN" \
+  -H "Idempotency-Key: reminder-a-19-v1" \
   -d '{"phone":"+15555550142","purpose":"appointment_reminder","appointment_id":"a-19","when_text":"Tuesday at 3 PM"}'
 ```
+
+Send an `Idempotency-Key` with every request (your job id works). A retry with the same key and body gets the stored response back with `Idempotent-Replayed: true`; the same key with a different body is `422`; a retry while the first is still running is `409` with `Retry-After: 1`. Keys are kept for 24 hours. `REQUIRE_IDEMPOTENCY_KEY=true` rejects requests without one. A key names one intent: when a `409` says `retry_after`, schedule a new request with a new key.
 
 `202` means queued with Twilio. `409` comes back with `reasons` (for example `["outside_calling_hours"]`) and, where it applies, `retry_after`. Bodies over 64 KiB get `413`.
 
@@ -71,6 +74,8 @@ With `OUTBOUND_ENABLED=true`, `callgate serve` refuses to start unless `AUDIT_HA
 **Attempts count only if the phone may have rung.** An attempt is `pending` until Twilio answers the REST call. If Twilio refuses it outright (a 4xx, or `failed` in a status callback) it becomes `not_placed`/`failed` and does not count against `MAX_ATTEMPTS_PER_DAY` or the minimum gap. Ambiguous errors become `unknown` and do count, because the phone might have rung. If recording the attempt fails, the rate-limit token is given back.
 
 **Status only moves forward.** Twilio signs webhooks but includes no nonce or timestamp, so a replayed callback is indistinguishable from a real one. Attempt statuses follow a one-way order (`pending`, `unknown`, `queued`, `ringing`, `in-progress`, then a final state), and a callback that would move an attempt backwards or sideways is ignored with a 200 so Twilio does not retry. `AnsweredBy` has its own column. A replayed keypress confirmation is recorded once per call.
+
+**Idempotency on our side, because Twilio has none.** The gate already stops a retried `POST /calls` from ringing twice (the first attempt counts against the cap and the minimum gap), but the retry would get a `409 too_soon_since_last_attempt`, and a job queue reading that as failure will page someone or give up on a call that went fine. With an `Idempotency-Key` the retry gets the original `202` and call SID. The key is claimed in the same SQLite transaction discipline as the gate; a claim held longer than two minutes counts as abandoned (the worker died) and can be taken over, and the old claimant can no longer write its result over the new one. Unexpected errors release the key; the attempt row, if one was written, still counts against the cap.
 
 **Retries only when Twilio clearly did not act.** The Calls API has no idempotency key, so a retry after a 500 or a read timeout can ring someone twice. `callgate` retries 429, 503 and refused connections with full-jitter backoff (honouring `Retry-After`), and marks anything ambiguous as `unknown` for the status callback to settle.
 

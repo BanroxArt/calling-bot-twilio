@@ -3,13 +3,24 @@
 Twilio-facing routes (``/twilio/...``) require a valid X-Twilio-Signature.
 The one internal route, ``POST /calls``, requires a bearer token. Health is
 open. Everything else is 404.
+
+``POST /calls`` honours an ``Idempotency-Key`` header (the IETF httpapi
+draft's semantics): the first request with a key runs, a retry with the same
+key and body gets the stored response with ``Idempotent-Replayed: true``,
+the same key with a different body is 422, and a retry while the first is
+still running is 409. The gate's attempt cap and minimum gap already stop a
+retry from ringing the phone twice; what the key adds is the right answer
+for the retry (the original 202 and call SID instead of a 409 that says
+"too soon").
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
+import re
 import urllib.parse
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -27,6 +38,11 @@ log = logging.getLogger(__name__)
 STOP_WORDS = {"stop", "stopall", "unsubscribe", "cancel", "end", "quit", "optout", "revoke"}
 START_WORDS = {"start", "unstop", "yes"}
 MAX_BODY = 64 * 1024
+# The draft leaves the format to the server. Printable ASCII, 1 to 255
+# characters, covers UUIDs and any job-queue id without letting a client
+# park megabytes in the table.
+IDEMPOTENCY_KEY = re.compile(r"[\x20-\x7e]{1,255}")
+EXTRA_HEADERS = "callgate.extra_headers"
 
 
 class _BadRequest(Exception):
@@ -46,6 +62,7 @@ STATUS_TEXT = {
     405: "Method Not Allowed",
     409: "Conflict",
     413: "Content Too Large",
+    422: "Unprocessable Content",
     500: "Internal Server Error",
     503: "Service Unavailable",
 }
@@ -62,6 +79,8 @@ class App:
     ) -> Iterable[bytes]:
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
+        extra: list[tuple[str, str]] = []
+        environ[EXTRA_HEADERS] = extra
         try:
             status, ctype, body = self.dispatch(method, path, environ)
         except _BadRequest as exc:
@@ -72,7 +91,7 @@ class App:
         data = body.encode()
         start_response(
             f"{status} {STATUS_TEXT.get(status, 'Error')}",
-            [("Content-Type", ctype), ("Content-Length", str(len(data)))],
+            [("Content-Type", ctype), ("Content-Length", str(len(data))), *extra],
         )
         return [data]
 
@@ -232,6 +251,37 @@ class App:
             phone, purpose = str(req["phone"]), str(req["purpose"])
         except (ValueError, KeyError, TypeError):
             return 400, "application/json", json.dumps({"error": "need phone and purpose"})
+        key = environ.get("HTTP_IDEMPOTENCY_KEY")
+        if key is None:
+            if self.s.require_idempotency_key:
+                return 400, "application/json", json.dumps({"error": "Idempotency-Key required"})
+            return self._place(req, phone, purpose)
+        if not IDEMPOTENCY_KEY.fullmatch(key):
+            return 400, "application/json", json.dumps({"error": "bad Idempotency-Key"})
+        # Canonical JSON, so key order and whitespace in the retry do not matter.
+        canon = json.dumps(req, sort_keys=True, separators=(",", ":"))
+        claim = self.store.claim_idempotency_key(key, hashlib.sha256(canon.encode()).hexdigest())
+        if claim.outcome == "replay":
+            environ[EXTRA_HEADERS].append(("Idempotent-Replayed", "true"))
+            return int(claim.status or 500), "application/json", str(claim.body)
+        if claim.outcome == "mismatch":
+            msg = "Idempotency-Key was already used with a different request body"
+            return 422, "application/json", json.dumps({"error": msg})
+        if claim.outcome == "in_flight":
+            environ[EXTRA_HEADERS].append(("Retry-After", "1"))
+            msg = "a request with this Idempotency-Key is still being processed"
+            return 409, "application/json", json.dumps({"error": msg})
+        try:
+            status, ctype, body = self._place(req, phone, purpose)
+        except BaseException:
+            # Nothing to replay. The attempt row (if any) still counts against
+            # the cap, so a retry with the same key cannot ring twice.
+            self.store.release_idempotency_key(claim, key)
+            raise
+        self.store.complete_idempotency_key(claim, key, status, body)
+        return status, ctype, body
+
+    def _place(self, req: dict[str, Any], phone: str, purpose: str) -> tuple[int, str, str]:
         result = self.dialer.remind(
             phone,
             purpose,
