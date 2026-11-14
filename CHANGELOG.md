@@ -26,6 +26,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ### Added
 
+- Calling policy: `CALL_DAYS` (allowed weekdays), `CALL_WINDOW_<DAY>` per-weekday windows and `CALL_HOLIDAYS` / `CALL_HOLIDAYS_FILE` (local dates in the callee's timezone). Denials name the rule (`holiday`, `calling_day_not_allowed`, `outside_calling_hours`) and `retry_after` is the first minute the full policy allows. `hours.CallingPolicy` is usable on its own.
 - Schema migrations tracked in `PRAGMA user_version`.
 - mypy (strict) in CI, a `py.typed` marker, and Hypothesis property tests for calling windows across DST, phone normalisation, the token bucket and the status order.
 - SECURITY.md, CONTRIBUTING.md and this file.

@@ -22,7 +22,7 @@ your app --POST /calls--> Gate.check --Approval--> TwilioClient.create_call --> 
 
 That is a guard against mistakes and shortcuts in your own code, not a security boundary. Code in the same process can read the key, and anything that holds the Twilio auth token can call Twilio without `callgate` at all. Keep the token in the one service that runs the gate.
 
-The gate checks, in order: outbound switched on (`OUTBOUND_ENABLED`, off by default), valid E.164, not on the do-not-call list, active consent for this number and purpose with evidence attached and not older than `CONSENT_MAX_AGE_DAYS`, inside the calling window in the timezone stored on the consent, under the per-number attempt cap and minimum gap, and a token from the global rate limiter. Each decision is logged with its reasons and a keyed hash of the number, not the number itself. With outbound on, the gate refuses to approve anything without an `AUDIT_HASH_KEY`, and `callgate serve` will not start without it.
+The gate checks, in order: outbound switched on (`OUTBOUND_ENABLED`, off by default), valid E.164, not on the do-not-call list, active consent for this number and purpose with evidence attached and not older than `CONSENT_MAX_AGE_DAYS`, inside the calling policy (allowed weekday, not a listed holiday, inside that day's window) in the timezone stored on the consent, under the per-number attempt cap and minimum gap, and a token from the global rate limiter. Each decision is logged with its reasons and a keyed hash of the number, not the number itself. With outbound on, the gate refuses to approve anything without an `AUDIT_HASH_KEY`, and `callgate serve` will not start without it.
 
 ## Run it
 
@@ -61,6 +61,8 @@ With `OUTBOUND_ENABLED=true`, `callgate serve` refuses to start unless `AUDIT_HA
 ## Design decisions
 
 **Consent is append-only.** Granting adds a row with source, evidence pointer, disclosure version and timezone, and marks older active rows for the same number and purpose as `superseded:<new id>`. A grant without evidence is refused. Revoking stamps `revoked_at` and `revoked_via`. Nothing flips back. The gate uses the newest record that passes every consent check, so a stray incomplete row (from an import, say) cannot hide a valid one. After an opt-out, a new opt-in has to be captured and recorded like the first one. An SMS `START` re-enables texting at the carrier but does not restore call consent here.
+
+**Calling policy, not just a window.** `CALL_WINDOW_START`/`CALL_WINDOW_END` set the default daily window. `CALL_DAYS` limits the weekdays (`mon-fri`, `mon-sat`, ...), `CALL_WINDOW_SAT=10:00-17:00` and its siblings give one weekday its own window, and `CALL_HOLIDAYS` / `CALL_HOLIDAYS_FILE` list dates with no calls. All of it is evaluated in the callee's timezone, holidays included: July 3 in New York starts at midnight New York time. A refusal says which rule fired (`holiday`, `calling_day_not_allowed`, `outside_calling_hours`) and `retry_after` is the first minute the whole policy allows, found by walking forward through days and DST changes. No holiday list ships; [examples/holidays.example.txt](examples/holidays.example.txt) shows the format.
 
 **Timezone comes from the person, not the area code.** Mobile numbers move with people. A missing or invalid timezone on a consent record is a denial, not a guess.
 

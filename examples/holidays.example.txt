@@ -1,0 +1,18 @@
+# Example CALL_HOLIDAYS_FILE: one YYYY-MM-DD per line, # starts a comment.
+# Dates are local dates in the callee's timezone.
+#
+# These are the 2027 US federal holidays on their calendar dates. They are
+# here to show the format, not as a recommendation: which days you may not
+# call on depends on the state and the call type, and some rules use the
+# observed weekday rather than the calendar date. Build your list with counsel.
+2027-01-01  # New Year's Day
+2027-01-18  # Birthday of Martin Luther King, Jr.
+2027-02-15  # Washington's Birthday
+2027-05-31  # Memorial Day
+2027-06-19  # Juneteenth (Saturday; observed Friday 2027-06-18)
+2027-07-04  # Independence Day (Sunday; observed Monday 2027-07-05)
+2027-09-06  # Labor Day
+2027-10-11  # Columbus Day
+2027-11-11  # Veterans Day
+2027-11-25  # Thanksgiving Day
+2027-12-25  # Christmas Day (Saturday; observed Friday 2027-12-24)

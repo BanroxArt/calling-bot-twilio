@@ -20,7 +20,8 @@ Checks, in order, all of which must pass:
 3. The number is not on the internal do-not-call list.
 4. There is an active, unrevoked consent record for this exact number and
    purpose, younger than ``consent_max_age_days``.
-5. It is inside the calling window in the timezone on that record.
+5. It is inside the calling policy (allowed weekday, not a listed holiday,
+   inside that day's window) in the timezone on that record.
 6. Fewer than ``max_attempts_per_day`` attempts in the last 24 hours, and at
    least ``min_gap_minutes`` since the last one. Attempts Twilio refused
    outright (``not_placed``) or reported as ``failed`` never rang the phone
@@ -46,7 +47,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from callgate.config import Settings
-from callgate.hours import TimezoneError, in_window, next_window_start
+from callgate.hours import TimezoneError
 from callgate.phone import PhoneError, digest, mask, normalize
 from callgate.ratelimit import TokenBucket
 from callgate.store import Consent, Store
@@ -213,12 +214,12 @@ class Gate:
         consent = next((c for c in records if not self._consent_problems(c, now)), None)
         if consent is None:
             return Decision(False, self._consent_problems(records[0], now))
+        policy = self.s.calling_policy
         try:
-            if not in_window(now, consent.timezone, self.s.window_start, self.s.window_end):
-                nxt = next_window_start(
-                    now, consent.timezone, self.s.window_start, self.s.window_end
-                )
-                return Decision(False, ("outside_calling_hours",), retry_after=nxt)
+            blocked = policy.blocked(now, consent.timezone)
+            if blocked is not None:
+                nxt = policy.next_allowed(now, consent.timezone)
+                return Decision(False, (blocked,), retry_after=nxt)
         except TimezoneError:
             return Decision(False, ("bad_timezone_on_consent",))
         ts = now.timestamp()

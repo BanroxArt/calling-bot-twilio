@@ -6,8 +6,10 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import date, time
+from pathlib import Path
 
+from callgate.hours import DAY_NAMES, CallingPolicy, PolicyError, parse_days, parse_holidays
 from callgate.phone import PhoneError, normalize
 
 
@@ -42,9 +44,18 @@ class Settings:
     min_gap_minutes: int = 120
     window_start: time = time(8, 0)
     window_end: time = time(21, 0)
+    call_days: frozenset[int] = frozenset(range(7))
+    day_windows: tuple[tuple[int, time, time], ...] = ()
+    holidays: frozenset[date] = frozenset()
     consent_max_age_days: int = 548
     host: str = "127.0.0.1"
     port: int = 8080
+
+    @property
+    def calling_policy(self) -> CallingPolicy:
+        return CallingPolicy(
+            self.window_start, self.window_end, self.call_days, self.day_windows, self.holidays
+        )
 
 
 MIN_SECRET_LEN = 32
@@ -103,6 +114,28 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
     end = _hhmm(env.get("CALL_WINDOW_END", "21:00"), "CALL_WINDOW_END")
     if not start < end:
         raise ConfigError("call window must not wrap midnight")
+    try:
+        days = parse_days(env.get("CALL_DAYS", "all"))
+        day_windows = []
+        for i, name in enumerate(DAY_NAMES):
+            raw = env.get(f"CALL_WINDOW_{name.upper()}", "").strip()
+            if raw:
+                a, sep, b = raw.partition("-")
+                if not sep:
+                    raise ConfigError(f"CALL_WINDOW_{name.upper()} must be HH:MM-HH:MM")
+                key = f"CALL_WINDOW_{name.upper()}"
+                day_windows.append((i, _hhmm(a.strip(), key), _hhmm(b.strip(), key)))
+        holiday_lines = [env.get("CALL_HOLIDAYS", "")]
+        holiday_file = env.get("CALL_HOLIDAYS_FILE", "")
+        if holiday_file:
+            try:
+                holiday_lines += Path(holiday_file).read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                raise ConfigError(f"CALL_HOLIDAYS_FILE: {exc.strerror}") from exc
+        holidays = parse_holidays(holiday_lines)
+        CallingPolicy(start, end, days, tuple(day_windows), holidays)
+    except PolicyError as exc:
+        raise ConfigError(str(exc)) from exc
     return Settings(
         account_sid=sid,
         auth_token=env.get("TWILIO_AUTH_TOKEN", ""),
@@ -119,6 +152,9 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
         min_gap_minutes=int(_num(env, "MIN_GAP_MINUTES", "120", int)),
         window_start=start,
         window_end=end,
+        call_days=days,
+        day_windows=tuple(day_windows),
+        holidays=holidays,
         consent_max_age_days=int(_num(env, "CONSENT_MAX_AGE_DAYS", "548", int)),
         host=env.get("HOST", "127.0.0.1"),
         port=int(_num(env, "PORT", "8080", int)),
