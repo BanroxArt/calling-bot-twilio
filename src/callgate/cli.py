@@ -13,6 +13,9 @@ from callgate.dialer import Dialer
 from callgate.gate import Gate
 from callgate.hours import TimezoneError, zone
 from callgate.phone import PhoneError, normalize
+from callgate.retention import RetentionError, RetentionPolicy
+from callgate.retention import apply as retention_apply
+from callgate.retention import plan as retention_plan
 from callgate.store import Store
 from callgate.twilio import TwilioClient
 
@@ -67,6 +70,27 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0 if d.allowed else 1
 
 
+def cmd_retention(args: argparse.Namespace) -> int:
+    try:
+        s = config.load(require_twilio=False)
+        policy = RetentionPolicy(
+            s.retain_audit_days,
+            s.retain_attempt_days,
+            s.retain_revoked_consent_days,
+            s.retain_webhook_days,
+        )
+    except (config.ConfigError, RetentionError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    store = _store(args)
+    try:
+        report = retention_apply(store, policy) if args.apply else retention_plan(store, policy)
+    finally:
+        store.close()
+    print(json.dumps(report.to_dict(), sort_keys=True))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     settings = config.load()
     store = Store(settings.database_path)
@@ -109,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
     chk.add_argument("phone")
     chk.add_argument("--purpose", required=True)
     chk.set_defaults(func=cmd_check)
+
+    ret = sub.add_parser(
+        "retention", help="show (default) or delete rows past the RETAIN_* periods"
+    )
+    ret.add_argument("--apply", action="store_true", help="delete; without it nothing changes")
+    ret.set_defaults(func=cmd_retention)
 
     srv = sub.add_parser("serve", help="run the webhook server (wsgiref, for development)")
     srv.set_defaults(func=cmd_serve)

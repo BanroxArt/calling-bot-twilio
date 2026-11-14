@@ -51,6 +51,10 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8080
     require_idempotency_key: bool = False
+    retain_audit_days: int = 1825
+    retain_attempt_days: int = 365
+    retain_revoked_consent_days: int = 1825
+    retain_webhook_days: int = 90
 
     @property
     def calling_policy(self) -> CallingPolicy:
@@ -163,4 +167,8 @@ def load(env: Mapping[str, str] | None = None, *, require_twilio: bool = True) -
         host=env.get("HOST", "127.0.0.1"),
         port=int(_num(env, "PORT", "8080", int)),
         require_idempotency_key=require_key == "true",
+        retain_audit_days=int(_num(env, "RETAIN_AUDIT_DAYS", "1825", int)),
+        retain_attempt_days=int(_num(env, "RETAIN_ATTEMPT_DAYS", "365", int)),
+        retain_revoked_consent_days=int(_num(env, "RETAIN_REVOKED_CONSENT_DAYS", "1825", int)),
+        retain_webhook_days=int(_num(env, "RETAIN_WEBHOOK_DAYS", "90", int)),
     )
