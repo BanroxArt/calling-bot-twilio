@@ -97,6 +97,10 @@ With `OUTBOUND_ENABLED=true`, `callgate serve` refuses to start unless `AUDIT_HA
 - No national DNC registry lookup. The internal list only covers people who opted out with you. Whether you need registry scrubbing depends on the call type; ask counsel.
 - English script only, one voice, no speech recognition or LLM. Adding one is in `SKILL.md`, behind the same gate.
 
+## Benchmarks
+
+Per-operation timings and how to reproduce them: [docs/benchmarks.md](docs/benchmarks.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE). Copyright 2026 Banrox Inc.

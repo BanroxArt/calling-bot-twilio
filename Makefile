@@ -1,6 +1,6 @@
 PY ?= python3
 
-.PHONY: install lint test check
+.PHONY: bench install lint test check
 
 install:
 	$(PY) -m pip install -e '.[dev]'
@@ -15,3 +15,6 @@ test:
 	$(PY) -m pytest -q
 
 check: lint test
+
+bench:
+	PYTHONPATH=src $(PY) bench/run.py
