@@ -26,6 +26,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ### Added
 
+- Visible author attribution, a `CITATION.cff` citation file, and `llms.txt`.
+
 - `callgate retention [--apply]`: dry run by default; deletes audit rows, attempts, revoked consent, webhook replay keys and expired idempotency keys past their `RETAIN_*` periods in batches with `secure_delete` on, never active consent or DNC entries, and records one counts-only audit row.
 - `Idempotency-Key` on `POST /calls`: replay with `Idempotent-Replayed: true`, `422` on a reused key with a different body, `409` while in flight, 24 hour retention, takeover of abandoned claims with owner tokens. `REQUIRE_IDEMPOTENCY_KEY` makes it mandatory. Schema migration 2 adds the table.
 - Calling policy: `CALL_DAYS` (allowed weekdays), `CALL_WINDOW_<DAY>` per-weekday windows and `CALL_HOLIDAYS` / `CALL_HOLIDAYS_FILE` (local dates in the callee's timezone). Denials name the rule (`holiday`, `calling_day_not_allowed`, `outside_calling_hours`) and `retry_after` is the first minute the full policy allows. `hours.CallingPolicy` is usable on its own.

@@ -4,7 +4,7 @@
 
 It is not a dialer for lists, not a sales tool, and has no feature for hiding or spoofing caller ID. The repo also has `SKILL.md`, an agent skill for designing a calling bot (Twilio first, Vapi or Retell as alternatives) around the same rules.
 
-Author: Art Akopian ([Banrox](https://banrox.com))
+Built and maintained by Art Akopian, CEO of [Banrox](https://banrox.com). Banrox builds consumer credit and fraud-prevention software and publishes the general-purpose pieces.
 
 Nothing here is legal advice. See [docs/compliance-notes.md](docs/compliance-notes.md) and talk to counsel before calling anyone.
 

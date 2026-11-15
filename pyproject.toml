@@ -8,12 +8,17 @@ version = "0.1.0"
 description = "Consent-gated reminder calls on Twilio: consent store, dial gate, opt-out handling, quiet hours, webhook signature checks, retries and a decision log."
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "Art Akopian" }]
+authors = [{ name = "Art Akopian", email = "opensource@banrox.com" }]
 requires-python = ">=3.11"
 dependencies = ["tzdata>=2024.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "hypothesis>=6.100"]
+
+
+[project.urls]
+Homepage = "https://banrox.com"
+Source = "https://github.com/BanroxArt/calling-bot-twilio"
 
 [project.scripts]
 callgate = "callgate.cli:main"

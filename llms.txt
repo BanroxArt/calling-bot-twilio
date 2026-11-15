@@ -1,0 +1,32 @@
+# calling-bot-twilio
+
+> A consent-gated appointment reminder service for Twilio: no consent record, no dial.
+
+`callgate` enforces consent in the call graph rather than in a later feature. `Gate.check` runs do-not-call, active consent with evidence, calling policy in the callee's timezone (weekdays, holidays, daily windows), attempt caps and a rate limit in one transaction, then issues a single-use, HMAC-tagged, 60-second `Approval` that the Twilio client requires before placing a call. Opt-out by keypress and SMS, signed Twilio webhooks, idempotent `POST /calls`, and a retention command are included. It is not a list dialer or a sales tool. Nothing in the repository is legal advice.
+
+Built and maintained by Art Akopian, CEO of Banrox (https://banrox.com).
+
+## Docs
+
+- [README.md](https://github.com/BanroxArt/calling-bot-twilio/blob/main/README.md): How a call is approved, how to run the service, Twilio setup and design decisions.
+- [docs/compliance-notes.md](https://github.com/BanroxArt/calling-bot-twilio/blob/main/docs/compliance-notes.md): What the code takes into account and what it leaves to counsel. Not legal advice.
+- [docs/benchmarks.md](https://github.com/BanroxArt/calling-bot-twilio/blob/main/docs/benchmarks.md): Timeit measurements for the hot paths.
+- [SKILL.md](https://github.com/BanroxArt/calling-bot-twilio/blob/main/SKILL.md): Agent skill for designing a calling bot around the same rules.
+
+## Source
+
+- [gate.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/gate.py): The consent, hours, cap and rate-limit checks, and the HMAC-tagged Approval.
+- [dialer.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/dialer.py): Places a call only with a valid Approval; re-checks opt-out before dialing.
+- [twilio.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/twilio.py): Twilio REST client and signed webhook validation.
+- [hours.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/hours.py): Calling windows, weekdays and holidays in the callee's timezone, including DST.
+- [store.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/store.py): Append-only consent, attempts, audit and idempotency records.
+- [app.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/app.py): HTTP API: `/calls`, Twilio voice, status and inbound SMS.
+- [retention.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/retention.py): Period-based deletion of attempts, audit and keys; evidence is kept.
+- [ratelimit.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/ratelimit.py): Global outbound rate limiter.
+- [cli.py](https://github.com/BanroxArt/calling-bot-twilio/blob/main/src/callgate/cli.py): Consent, check, serve and retention commands.
+
+## Optional
+
+- [CHANGELOG](https://github.com/BanroxArt/calling-bot-twilio/blob/main/CHANGELOG.md): Notable changes.
+- [SECURITY](https://github.com/BanroxArt/calling-bot-twilio/blob/main/SECURITY.md): How to report a vulnerability.
+- [CONTRIBUTING](https://github.com/BanroxArt/calling-bot-twilio/blob/main/CONTRIBUTING.md): How to propose a change.
